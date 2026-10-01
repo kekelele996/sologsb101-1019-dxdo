@@ -4,7 +4,7 @@
  */
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import { createId, db, removeLeafCascade } from '@/utils/db'
+import { assertVolumeOpenForRepair, createId, db, removeLeafCascade } from '@/utils/db'
 import {
   nextLeafState,
   type DamageType,
@@ -12,6 +12,7 @@ import {
   type LeafDraft,
   type LeafState
 } from '@/types/leaf'
+import { useRepairVolumeStore } from './repairVolumeStore'
 
 export interface LeafFilters {
   keyword: string
@@ -98,30 +99,52 @@ export const useLeafStore = defineStore('leaf', () => {
     filters.value = { ...DEFAULT_LEAF_FILTERS }
   }
 
+  /** 破损 / 补纸 / 工序变动后回写修复师那本进度（装订锁定时 syncRepairState 自行跳过） */
+  async function syncVolumeProgress(volumeId: string): Promise<void> {
+    const leavesOfVolume = leaves.value.filter((leaf) => leaf.volumeId === volumeId)
+    const leafIds = leavesOfVolume.map((leaf) => leaf.id)
+    const orders = leafIds.length === 0 ? [] : await db.repairOrders.where('leafId').anyOf(leafIds).toArray()
+    await useRepairVolumeStore().syncRepairState(volumeId, leavesOfVolume, orders)
+  }
+
   async function createLeaf(draft: LeafDraft): Promise<Leaf> {
+    await assertVolumeOpenForRepair(draft.volumeId)
     const now = Date.now()
     const row: Leaf = { ...draft, id: createId('leaf'), createdAt: now, updatedAt: now }
     await db.leaves.put(row)
     await loadLeaves()
+    await syncVolumeProgress(row.volumeId)
     return row
   }
 
   async function updateLeaf(id: string, patch: Partial<Leaf>): Promise<void> {
+    const existing = leaves.value.find((leaf) => leaf.id === id)
+    await assertVolumeOpenForRepair(patch.volumeId ?? existing?.volumeId ?? '')
     await db.leaves.update(id, { ...patch, updatedAt: Date.now() } as never)
     await loadLeaves()
+    const volumeId = patch.volumeId ?? existing?.volumeId
+    if (volumeId) await syncVolumeProgress(volumeId)
   }
 
   async function removeLeaf(id: string): Promise<void> {
+    const existing = leaves.value.find((leaf) => leaf.id === id)
+    if (existing) await assertVolumeOpenForRepair(existing.volumeId)
+    const volumeId = existing?.volumeId ?? ''
     await removeLeafCascade(id)
     await loadLeaves()
+    if (volumeId) await syncVolumeProgress(volumeId)
   }
 
   async function batchUpdate(ids: string[], patch: Partial<Leaf>): Promise<void> {
     if (ids.length === 0) return
+    const targets = leaves.value.filter((leaf) => ids.includes(leaf.id))
+    const volumeIds = new Set(targets.map((leaf) => leaf.volumeId))
+    for (const volumeId of volumeIds) await assertVolumeOpenForRepair(volumeId)
     const now = Date.now()
-    const rows = leaves.value.filter((leaf) => ids.includes(leaf.id)).map((leaf) => ({ ...leaf, ...patch, updatedAt: now }))
+    const rows = targets.map((leaf) => ({ ...leaf, ...patch, updatedAt: now }))
     await db.leaves.bulkPut(rows)
     await loadLeaves()
+    for (const volumeId of volumeIds) await syncVolumeProgress(volumeId)
   }
 
   async function advanceLeafState(id: string): Promise<void> {
@@ -158,6 +181,7 @@ export const useLeafStore = defineStore('leaf', () => {
     removeLeaf,
     batchUpdate,
     advanceLeafState,
+    syncVolumeProgress,
     leafById
   }
 })

@@ -1,12 +1,18 @@
 /**
- * 古籍与册次 store（Pinia setup store）
- * 维护古籍列表、册次列表、当前选中的古籍 / 册次与筛选条件；
- * 页面的跨页状态一律从这里读写，不留在组件内部 ref。
+ * 古籍 store（Pinia setup store）
+ * 维护古籍列表、当前选中的古籍 / 册次与筛选条件。
+ *
+ * 册次档案自 v3 起拆成修复师那本与装订间那本，本 store 不再持有可写的单本 Volume，
+ * 只聚合两本的只读视图（VolumeView）供台账 / 页面展示；
+ * 开新册在两本上同立一页（createVolumePair），改修复字段走 repairVolumeStore，
+ * 改装订字段 / 验收走 binderyStore，从根上杜绝两边互改对方的叶。
  */
 import { computed, ref, watch } from 'vue'
 import { defineStore } from 'pinia'
 import {
+  assertVolumeOpenForRepair,
   createId,
+  createVolumePair,
   db,
   readUiPrefs,
   removeBookCascade,
@@ -15,11 +21,32 @@ import {
 } from '@/utils/db'
 import type { Book, BookDraft, BookLevel } from '@/types/book'
 import {
-  nextVolumeState,
-  type Volume,
-  type VolumeDraft,
-  type VolumeState
+  aggregateVolumeState,
+  type BindingType,
+  type VolumeView
 } from '@/types/volume'
+import {
+  createEmptyBinderyVolumeDraft,
+  type BinderyVolume
+} from '@/types/binderyVolume'
+import {
+  createEmptyRepairVolumeDraft,
+  type RepairVolume,
+  type RepairVolumeDraft
+} from '@/types/repairVolume'
+import { useRepairVolumeStore } from './repairVolumeStore'
+import { useBinderyStore } from './binderyStore'
+
+/** 开新册时两边各填各的初始字段 */
+export interface VolumePairDraft {
+  bookId: string
+  volumeNo: number
+  // 修复师那本
+  leafCount: number
+  repairState: RepairVolumeDraft['repairState']
+  // 装订间那本
+  bindingType: BindingType
+}
 
 export interface BookFilters {
   keyword: string
@@ -29,16 +56,28 @@ export interface BookFilters {
 
 export const DEFAULT_BOOK_FILTERS: BookFilters = { keyword: '', eras: [], levels: [] }
 
+export function createEmptyVolumePairDraft(bookId: string, volumeNo: number): VolumePairDraft {
+  return {
+    bookId,
+    volumeNo,
+    leafCount: createEmptyRepairVolumeDraft(bookId, volumeNo).leafCount,
+    repairState: createEmptyRepairVolumeDraft(bookId, volumeNo).repairState,
+    bindingType: createEmptyBinderyVolumeDraft(bookId, volumeNo).bindingType
+  }
+}
+
 export const useBookStore = defineStore('book', () => {
   const prefs = readUiPrefs()
   const books = ref<Book[]>([])
-  const volumes = ref<Volume[]>([])
   const currentBookId = ref<string | null>(prefs.lastBookId)
   const currentVolumeId = ref<string | null>(prefs.lastVolumeId)
   const filters = ref<BookFilters>({ ...DEFAULT_BOOK_FILTERS })
   const loading = ref(false)
   const ready = ref(false)
   const error = ref('')
+
+  const repairVolumeStore = useRepairVolumeStore()
+  const binderyStore = useBinderyStore()
 
   watch([currentBookId, currentVolumeId], ([bookId, volumeId]) => {
     writeUiPrefs({ ...readUiPrefs(), lastBookId: bookId, lastVolumeId: volumeId })
@@ -48,7 +87,42 @@ export const useBookStore = defineStore('book', () => {
     () => books.value.find((book) => book.id === currentBookId.value) ?? null
   )
 
-  const currentVolume = computed<Volume | null>(
+  /**
+   * 两本聚合视图（同 id 配对）。叶数 / 修复状态取修复册，装订形式 / 阶段取装订册。
+   * 若两本因异常缺一边，用另一边兜底展示（写操作仍由各自 store 的写保护拦截）。
+   */
+  const volumes = computed<VolumeView[]>(() => {
+    const ids = new Set<string>([
+      ...repairVolumeStore.volumes.map((volume) => volume.id),
+      ...binderyStore.volumes.map((volume) => volume.id)
+    ])
+    const views: VolumeView[] = []
+    ids.forEach((id) => {
+      const repair = repairVolumeStore.volumeById(id)
+      const bindery = binderyStore.volumeById(id)
+      const identity = repair ?? bindery
+      if (!identity) return
+      views.push({
+        id,
+        bookId: identity.bookId,
+        volumeNo: identity.volumeNo,
+        leafCount: repair?.leafCount ?? 0,
+        repairState: repair?.repairState ?? 'pending',
+        bindingType: bindery?.bindingType ?? 'thread',
+        phase: bindery?.phase ?? 'repair',
+        state: aggregateVolumeState(
+          bindery?.phase ?? 'repair',
+          repair?.repairState ?? 'pending'
+        )
+      })
+    })
+    views.sort((a, b) =>
+      a.bookId === b.bookId ? a.volumeNo - b.volumeNo : a.bookId.localeCompare(b.bookId)
+    )
+    return views
+  })
+
+  const currentVolume = computed<VolumeView | null>(
     () => volumes.value.find((volume) => volume.id === currentVolumeId.value) ?? null
   )
 
@@ -86,12 +160,6 @@ export const useBookStore = defineStore('book', () => {
     } finally {
       loading.value = false
     }
-  }
-
-  async function loadVolumes(): Promise<void> {
-    const rows = await db.volumes.toArray()
-    rows.sort((a, b) => (a.bookId === b.bookId ? a.volumeNo - b.volumeNo : a.bookId.localeCompare(b.bookId)))
-    volumes.value = rows
   }
 
   function setCurrentBook(id: string | null): void {
@@ -135,36 +203,71 @@ export const useBookStore = defineStore('book', () => {
   async function removeBook(id: string): Promise<void> {
     await removeBookCascade(id)
     if (currentBookId.value === id) currentBookId.value = null
-    await Promise.all([loadBooks(), loadVolumes()])
+    await Promise.all([loadBooks(), repairVolumeStore.loadVolumes(), binderyStore.loadAll()])
   }
 
-  async function createVolume(draft: VolumeDraft): Promise<Volume> {
+  /** 开新册：修复师那本与装订间那本同立一页（同 id = 同一物理册），各写各的字段 */
+  async function createVolume(draft: VolumePairDraft): Promise<string> {
     const now = Date.now()
-    const row: Volume = { ...draft, id: createId('vol'), createdAt: now, updatedAt: now }
-    await db.volumes.put(row)
-    await loadVolumes()
-    await syncBookVolumeCount(row.bookId)
-    return row
+    const id = createId('vol')
+    const repair: RepairVolume = {
+      id,
+      bookId: draft.bookId,
+      volumeNo: draft.volumeNo,
+      leafCount: draft.leafCount,
+      repairState: draft.repairState,
+      createdAt: now,
+      updatedAt: now
+    }
+    const bindery: BinderyVolume = {
+      ...createEmptyBinderyVolumeDraft(draft.bookId, draft.volumeNo),
+      id,
+      bindingType: draft.bindingType,
+      createdAt: now,
+      updatedAt: now
+    }
+    await createVolumePair(repair, bindery)
+    await Promise.all([repairVolumeStore.loadVolumes(), binderyStore.loadAll()])
+    await syncBookVolumeCount(draft.bookId)
+    return id
   }
 
-  async function updateVolume(id: string, patch: Partial<Volume>): Promise<void> {
-    const existing = volumes.value.find((volume) => volume.id === id)
-    await db.volumes.update(id, { ...patch, updatedAt: Date.now() } as never)
-    await loadVolumes()
-    if (existing) await syncBookVolumeCount(existing.bookId)
+  /**
+   * 改修复师那本字段（叶数 / 修复进度）。装订锁定 / 挂起 / 归档时整册只读，直接拒。
+   */
+  async function updateRepairVolume(id: string, patch: Partial<RepairVolume>): Promise<void> {
+    await repairVolumeStore.updateVolume(id, patch)
+    await syncBookVolumeCount((repairVolumeStore.volumeById(id)?.bookId) ?? '')
+  }
+
+  /** 改装订间那本字段（装订形式等）；已归档只读。 */
+  async function updateBinderyVolume(id: string, patch: Partial<BinderyVolume>): Promise<void> {
+    await binderyStore.updateVolume(id, patch)
+  }
+
+  /** 册次号是两本共有的身份字段，两边同改（仅在修复师手上允许） */
+  async function updateVolumeIdentity(id: string, volumeNo: number): Promise<void> {
+    await assertVolumeOpenForRepair(id)
+    const now = Date.now()
+    await db.transaction('rw', [db.repairVolumes, db.binderyVolumes], async () => {
+      await db.repairVolumes.update(id, { volumeNo, updatedAt: now } as never)
+      await db.binderyVolumes.update(id, { volumeNo, updatedAt: now } as never)
+    })
+    await Promise.all([repairVolumeStore.loadVolumes(), binderyStore.loadAll()])
   }
 
   async function removeVolume(id: string): Promise<void> {
-    const existing = volumes.value.find((volume) => volume.id === id)
     await removeVolumeCascade(id)
     if (currentVolumeId.value === id) currentVolumeId.value = null
-    await loadVolumes()
-    if (existing) await syncBookVolumeCount(existing.bookId)
+    await Promise.all([repairVolumeStore.loadVolumes(), binderyStore.loadAll()])
+    const repair = repairVolumeStore.volumes.find((volume) => volume.id === id)
+    await syncBookVolumeCount(repair?.bookId ?? '')
   }
 
   /** 册次增删后回写古籍的册数，保证卡片回显一致 */
   async function syncBookVolumeCount(bookId: string): Promise<void> {
-    const count = volumes.value.filter((volume) => volume.bookId === bookId).length
+    if (!bookId) return
+    const count = repairVolumeStore.volumesOfBook(bookId).length
     const book = books.value.find((item) => item.id === bookId)
     if (book && book.volumeCount !== count) {
       await db.books.update(bookId, { volumeCount: count, updatedAt: Date.now() } as never)
@@ -172,23 +275,17 @@ export const useBookStore = defineStore('book', () => {
     }
   }
 
-  async function advanceVolumeState(id: string): Promise<void> {
-    const volume = volumes.value.find((item) => item.id === id)
-    if (!volume) return
-    const next: VolumeState = nextVolumeState(volume.state)
-    if (next === volume.state) return
-    await updateVolume(id, { state: next })
-  }
-
-  function volumesOfBook(bookId: string): Volume[] {
-    return volumes.value.filter((volume) => volume.bookId === bookId).sort((a, b) => a.volumeNo - b.volumeNo)
+  function volumesOfBook(bookId: string): VolumeView[] {
+    return volumes.value
+      .filter((volume) => volume.bookId === bookId)
+      .sort((a, b) => a.volumeNo - b.volumeNo)
   }
 
   function bookById(id: string): Book | undefined {
     return books.value.find((book) => book.id === id)
   }
 
-  function volumeById(id: string): Volume | undefined {
+  function volumeById(id: string): VolumeView | undefined {
     return volumes.value.find((volume) => volume.id === id)
   }
 
@@ -206,7 +303,6 @@ export const useBookStore = defineStore('book', () => {
     eraOptions,
     filteredBooks,
     loadBooks,
-    loadVolumes,
     setCurrentBook,
     setCurrentVolume,
     setKeyword,
@@ -217,9 +313,11 @@ export const useBookStore = defineStore('book', () => {
     updateBook,
     removeBook,
     createVolume,
-    updateVolume,
+    updateRepairVolume,
+    updateBinderyVolume,
+    updateVolumeIdentity,
     removeVolume,
-    advanceVolumeState,
+    syncBookVolumeCount,
     volumesOfBook,
     bookById,
     volumeById

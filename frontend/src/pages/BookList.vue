@@ -11,11 +11,11 @@ import { Delete, Edit, Plus, Right } from '@element-plus/icons-vue'
 import EmptyPanel from '@/components/common/EmptyPanel.vue'
 import FilterBar, { useFilterQuery, type FilterModel } from '@/components/common/FilterBar.vue'
 import StatBadge from '@/components/common/StatBadge.vue'
-import { useIdbTable } from '@/hooks/useIdbTable'
 import { useLeafStats } from '@/hooks/useLeafStats'
-import { useBookStore } from '@/stores/bookStore'
+import { useBookStore, createEmptyVolumePairDraft, type VolumePairDraft } from '@/stores/bookStore'
 import { useLeafStore } from '@/stores/leafStore'
 import { useRepairStore } from '@/stores/repairStore'
+import { useBinderyStore } from '@/stores/binderyStore'
 import {
   BOOK_LEVEL_COLOR,
   BOOK_LEVEL_LABEL,
@@ -25,25 +25,22 @@ import {
   type BookDraft,
   type BookLevel
 } from '@/types/book'
-import type { Binding } from '@/types/binding'
 import {
   BINDING_TYPE_LABEL,
   BINDING_TYPE_OPTIONS,
   VOLUME_STATE_COLOR,
   VOLUME_STATE_LABEL,
-  VOLUME_STATE_OPTIONS,
-  createEmptyVolumeDraft,
   isVolumeLocked,
-  type Volume,
-  type VolumeDraft
+  type VolumeView
 } from '@/types/volume'
+import { REPAIR_STATE_OPTIONS } from '@/types/repairVolume'
 
 const router = useRouter()
 const bookStore = useBookStore()
 const leafStore = useLeafStore()
 const repairStore = useRepairStore()
+const binderyStore = useBinderyStore()
 const { statOf } = useLeafStats()
-const bindingTable = useIdbTable<Binding>((database) => database.bindings, { sortByUpdatedAt: false })
 
 const FILTER_KEYS = ['era', 'level'] as const
 const url = useFilterQuery(FILTER_KEYS)
@@ -131,61 +128,74 @@ async function removeBook(book: Book): Promise<void> {
   ElMessage.success(`已删除《${book.title}》`)
 }
 
-/* ----------------------------- 册次管理 ----------------------------- */
+/* ----------------------------- 册次管理（两本各写各的） ----------------------------- */
 const volumeDialog = ref(false)
 const volumeBook = ref<Book | null>(null)
-const editingVolume = ref<Volume | null>(null)
-const volumeForm = reactive<VolumeDraft>(createEmptyVolumeDraft('', 1))
+const editingVolume = ref<VolumeView | null>(null)
+const volumeForm = reactive<VolumePairDraft>(createEmptyVolumePairDraft('', 1))
 
 const volumeList = computed(() => (volumeBook.value ? bookStore.volumesOfBook(volumeBook.value.id) : []))
 
 function openVolumeDialog(book: Book): void {
   volumeBook.value = book
   editingVolume.value = null
-  Object.assign(volumeForm, createEmptyVolumeDraft(book.id, volumeList.value.length + 1))
+  Object.assign(volumeForm, createEmptyVolumePairDraft(book.id, volumeList.value.length + 1))
   volumeDialog.value = true
 }
 
-function openEditVolume(volume: Volume): void {
+function openEditVolume(volume: VolumeView): void {
   editingVolume.value = volume
   Object.assign(volumeForm, {
     bookId: volume.bookId,
     volumeNo: volume.volumeNo,
     leafCount: volume.leafCount,
-    bindingType: volume.bindingType,
-    state: volume.state
+    repairState: volume.repairState,
+    bindingType: volume.bindingType
   })
 }
 
 async function submitVolume(): Promise<void> {
   if (editingVolume.value) {
-    await bookStore.updateVolume(editingVolume.value.id, { ...volumeForm })
+    const volume = editingVolume.value
+    // 身份字段（册次号）两边同改；修复字段只写修复本，装订字段只写装订本
+    if (volume.volumeNo !== volumeForm.volumeNo) {
+      await bookStore.updateVolumeIdentity(volume.id, volumeForm.volumeNo)
+    }
+    if (volume.leafCount !== volumeForm.leafCount || volume.repairState !== volumeForm.repairState) {
+      await bookStore.updateRepairVolume(volume.id, {
+        leafCount: volumeForm.leafCount,
+        repairState: volumeForm.repairState
+      })
+    }
+    if (volume.bindingType !== volumeForm.bindingType) {
+      await bookStore.updateBinderyVolume(volume.id, { bindingType: volumeForm.bindingType })
+    }
     ElMessage.success(`已更新第 ${volumeForm.volumeNo} 册`)
   } else {
-    await bookStore.createVolume({ ...volumeForm })
-    ElMessage.success(`已新增第 ${volumeForm.volumeNo} 册`)
+    const id = await bookStore.createVolume({ ...volumeForm })
+    ElMessage.success(`已新增第 ${volumeForm.volumeNo} 册（修复 / 装订各立一本）`)
+    void id
   }
   editingVolume.value = null
-  Object.assign(volumeForm, createEmptyVolumeDraft(volumeForm.bookId, volumeList.value.length + 1))
+  Object.assign(volumeForm, createEmptyVolumePairDraft(volumeForm.bookId, volumeList.value.length + 1))
 }
 
-async function removeVolume(volume: Volume): Promise<void> {
+async function removeVolume(volume: VolumeView): Promise<void> {
   try {
-    await ElMessageBox.confirm(`将删除第 ${volume.volumeNo} 册及其书叶、补纸与工序记录。`, '删除册次', {
-      type: 'warning',
-      confirmButtonText: '确认删除',
-      cancelButtonText: '取消'
-    })
+    await ElMessageBox.confirm(
+      `将删除第 ${volume.volumeNo} 册的两本档案及其书叶、补纸、工序、装订与点收记录。`,
+      '删除册次',
+      {
+        type: 'warning',
+        confirmButtonText: '确认删除',
+        cancelButtonText: '取消'
+      }
+    )
   } catch {
     return
   }
   await bookStore.removeVolume(volume.id)
   ElMessage.success('已删除该册次')
-}
-
-async function advanceVolume(volume: Volume): Promise<void> {
-  await bookStore.advanceVolumeState(volume.id)
-  ElMessage.success(`第 ${volume.volumeNo} 册状态已推进`)
 }
 
 function openLeaves(book: Book): void {
@@ -220,10 +230,12 @@ function bookStat(bookId: string): {
   )
 }
 
-/** 该古籍下已装订 / 已归档的册数，卡片回显使用 */
+/** 该古籍下已装订 / 已归档的册数，卡片回显使用（装订间那本口径） */
 function boundVolumes(bookId: string): number {
-  const volumeIds = bookStore.volumesOfBook(bookId).map((volume) => volume.id)
-  return bindingTable.rows.value.filter((binding) => volumeIds.includes(binding.volumeId)).length
+  return binderyStore
+    .volumesOfBook(bookId)
+    .filter((volume) => volume.phase === 'bound' || volume.phase === 'archived' || volume.phase === 'suspended')
+    .length
 }
 
 const totals = computed(() => ({
@@ -376,22 +388,43 @@ function bindingLabel(value: string): string {
     </el-dialog>
 
     <!-- 册次管理 -->
-    <el-dialog v-model="volumeDialog" :title="`册次管理 · ${volumeBook ? `《${volumeBook.title}》` : ''}`" width="720px">
-      <el-form :inline="true" label-width="80px" style="margin-bottom: 8px">
+    <el-dialog v-model="volumeDialog" :title="`册次管理 · ${volumeBook ? `《${volumeBook.title}》` : ''}`" width="780px">
+      <el-alert
+        type="info"
+        show-icon
+        :closable="false"
+        style="margin-bottom: 10px"
+        title="修复师那本记叶数与修复进度，装订间那本记装订形式与交接阶段，两本各写各的。"
+        description="装订完成后整册两本都锁成只读；返修验收会把册子交回修复师那本重开，此处才能再改修复字段。"
+      />
+      <el-form :inline="true" label-width="92px" style="margin-bottom: 8px">
         <el-form-item label="册次号">
-          <el-input-number v-model="volumeForm.volumeNo" :min="1" :max="99" />
+          <el-input-number v-model="volumeForm.volumeNo" :min="1" :max="99" :disabled="!!editingVolume && isVolumeLocked(editingVolume.phase)" />
         </el-form-item>
-        <el-form-item label="叶数">
-          <el-input-number v-model="volumeForm.leafCount" :min="0" :max="2000" />
+        <el-form-item label="叶数（修复）">
+          <el-input-number v-model="volumeForm.leafCount" :min="0" :max="2000" :disabled="!!editingVolume && isVolumeLocked(editingVolume.phase)" />
         </el-form-item>
-        <el-form-item label="装订">
-          <el-select v-model="volumeForm.bindingType" style="width: 130px">
+        <el-form-item label="装订形式">
+          <el-select
+            v-model="volumeForm.bindingType"
+            style="width: 130px"
+            :disabled="!!editingVolume && editingVolume.phase === 'archived'"
+          >
             <el-option v-for="item in BINDING_TYPE_OPTIONS" :key="item.value" :label="item.label" :value="item.value" />
           </el-select>
         </el-form-item>
-        <el-form-item label="状态">
-          <el-select v-model="volumeForm.state" style="width: 130px">
-            <el-option v-for="item in VOLUME_STATE_OPTIONS" :key="item.value" :label="item.label" :value="item.value" />
+        <el-form-item label="修复进度">
+          <el-select
+            v-model="volumeForm.repairState"
+            style="width: 150px"
+            :disabled="!!editingVolume && isVolumeLocked(editingVolume.phase)"
+          >
+            <el-option
+              v-for="item in REPAIR_STATE_OPTIONS"
+              :key="item.value"
+              :label="item.label"
+              :value="item.value"
+            />
           </el-select>
         </el-form-item>
         <el-form-item>
@@ -401,12 +434,12 @@ function bindingLabel(value: string): string {
       </el-form>
 
       <el-table :data="volumeList" size="small" border>
-        <el-table-column prop="volumeNo" label="册次" width="80" />
-        <el-table-column label="装订形式" width="110">
+        <el-table-column prop="volumeNo" label="册次" width="70" />
+        <el-table-column label="装订形式（装订本）" width="140">
           <template #default="{ row }">{{ bindingLabel(row.bindingType) }}</template>
         </el-table-column>
-        <el-table-column prop="leafCount" label="叶数" width="80" />
-        <el-table-column label="状态" width="110">
+        <el-table-column prop="leafCount" label="叶数（修复本）" width="110" />
+        <el-table-column label="交接阶段" width="120">
           <template #default="{ row }">
             <el-tag
               :style="{ background: `${volumeStateColor(row.state)}1f`, color: volumeStateColor(row.state) }"
@@ -417,15 +450,14 @@ function bindingLabel(value: string): string {
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="破损 / 工序" min-width="140">
+        <el-table-column label="破损 / 工序" min-width="130">
           <template #default="{ row }">
             {{ statOf(row.id).recordCount }} 条 / {{ statOf(row.id).orderDoneCount }}·{{ statOf(row.id).orderCount }}
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="240">
+        <el-table-column label="操作" width="170">
           <template #default="{ row }">
-            <el-button size="small" text type="primary" @click="advanceVolume(row)">推进状态</el-button>
-            <el-button size="small" text :disabled="isVolumeLocked(row.state)" @click="openEditVolume(row)">编辑</el-button>
+            <el-button size="small" text :disabled="isVolumeLocked(row.phase)" @click="openEditVolume(row)">编辑修复字段</el-button>
             <el-button size="small" text type="danger" @click="removeVolume(row)">删除</el-button>
           </template>
         </el-table-column>

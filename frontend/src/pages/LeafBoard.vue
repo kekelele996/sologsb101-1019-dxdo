@@ -64,7 +64,8 @@ watch(
 )
 
 const currentVolume = computed(() => volumes.value.find((volume) => volume.id === bookStore.currentVolumeId) ?? null)
-const locked = computed(() => (currentVolume.value ? isVolumeLocked(currentVolume.value.state) : false))
+// 锁定只认装订间那本的交接阶段：bound / suspended / archived 整册只读，返修交回（repair）重开
+const locked = computed(() => (currentVolume.value ? isVolumeLocked(currentVolume.value.phase) : false))
 
 const FILTER_KEYS = ['damageType', 'state'] as const
 const url = useFilterQuery(FILTER_KEYS)
@@ -240,12 +241,16 @@ function stateColor(state: string): string {
 
       <el-alert
         v-if="locked"
-        type="warning"
+        :type="currentVolume?.phase === 'suspended' ? 'error' : 'warning'"
         show-icon
         :closable="false"
         style="margin-bottom: 12px"
-        title="该册已装订完成，整册锁定为只读"
-        description="如需继续登记破损，请先在古籍台账中把册次状态回退为「修复中」。"
+        :title="currentVolume?.phase === 'suspended' ? '该册归档前对账挂起，整册只读等叶号核定' : '装订已完成，两本册都锁成只读'"
+        :description="
+          currentVolume?.phase === 'suspended'
+            ? '同一叶两边对不上，叶号已在装订归档页列出等人定；返修交回后这里才会重开。'
+            : '返修时由装订间登记「返修」结论，册子交回修复师那本重开后才能继续登记破损。'
+        "
       />
 
       <el-card shadow="never" style="margin-bottom: 14px">

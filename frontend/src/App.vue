@@ -10,6 +10,8 @@ import { ElMessage } from 'element-plus'
 import { useBookStore } from '@/stores/bookStore'
 import { useLeafStore } from '@/stores/leafStore'
 import { useRepairStore } from '@/stores/repairStore'
+import { useRepairVolumeStore } from '@/stores/repairVolumeStore'
+import { useBinderyStore } from '@/stores/binderyStore'
 import { initDatabase } from '@/utils/db'
 import { useLeafStats } from '@/hooks/useLeafStats'
 
@@ -18,13 +20,21 @@ const router = useRouter()
 const bookStore = useBookStore()
 const leafStore = useLeafStore()
 const repairStore = useRepairStore()
+const repairVolumeStore = useRepairVolumeStore()
+const binderyStore = useBinderyStore()
 const { totals } = useLeafStats()
 const ready = ref(false)
 
 onMounted(async () => {
   try {
     await initDatabase()
-    await Promise.all([bookStore.loadBooks(), bookStore.loadVolumes(), leafStore.loadLeaves(), repairStore.loadOrders()])
+    await Promise.all([
+      bookStore.loadBooks(),
+      repairVolumeStore.loadVolumes(),
+      binderyStore.loadAll(),
+      leafStore.loadLeaves(),
+      repairStore.loadOrders()
+    ])
   } catch (error) {
     ElMessage.error(`本地数据库初始化失败：${error instanceof Error ? error.message : '未知错误'}`)
   } finally {

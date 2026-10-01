@@ -7,7 +7,6 @@ import { useBookStore } from '@/stores/bookStore'
 import { useLeafStore } from '@/stores/leafStore'
 import { useRepairStore } from '@/stores/repairStore'
 import { DAMAGE_TYPE_LABEL, type DamageType } from '@/types/leaf'
-
 export interface VolumeLeafStat {
   volumeId: string
   leafCount: number

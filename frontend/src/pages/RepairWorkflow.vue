@@ -29,6 +29,7 @@ import {
   type RepairOrderDraft
 } from '@/types/repairOrder'
 import { PAPER_TYPE_LABEL, type Paper } from '@/types/paper'
+import { isVolumeLocked } from '@/types/volume'
 
 const bookStore = useBookStore()
 const leafStore = useLeafStore()
@@ -63,6 +64,12 @@ watch(
 )
 
 const currentLeaf = computed(() => (currentLeafId.value ? leafStore.leafById(currentLeafId.value) : undefined))
+// 装订间那本锁册后，工序 / 材料也只读；返修交回（phase=repair）才重新可写
+const currentLocked = computed(() => {
+  const leaf = currentLeaf.value
+  const volume = leaf ? bookStore.volumeById(leaf.volumeId) : undefined
+  return volume ? isVolumeLocked(volume.phase) : false
+})
 const currentPaper = computed(() =>
   currentLeafId.value ? paperTable.rows.value.find((paper) => paper.leafId === currentLeafId.value) : undefined
 )
@@ -269,10 +276,20 @@ watchEffect(() => {
         <el-select v-model="currentLeafId" filterable placeholder="选择书叶" style="width: 320px">
           <el-option v-for="item in leafOptions" :key="item.value" :label="item.label" :value="item.value" />
         </el-select>
-        <el-button :icon="Plus" @click="generate">生成标准序列</el-button>
-        <el-button type="primary" :icon="Plus" @click="openCreate">新增工序</el-button>
+        <el-button :icon="Plus" :disabled="currentLocked" @click="generate">生成标准序列</el-button>
+        <el-button type="primary" :icon="Plus" :disabled="currentLocked" @click="openCreate">新增工序</el-button>
       </div>
     </div>
+
+    <el-alert
+      v-if="currentLocked"
+      :type="currentLeaf && bookStore.volumeById(currentLeaf.volumeId)?.phase === 'suspended' ? 'error' : 'warning'"
+      show-icon
+      :closable="false"
+      style="margin-bottom: 12px"
+      title="该册装订档案不在修复师手上，工序 / 材料整册只读"
+      description="验收返修后册子会交回修复师那本重开；对账挂起的册需等叶号核定。"
+    />
 
     <div class="gb-stat-row">
       <StatBadge label="工序总数" :value="stat.total" suffix="道" tone="primary" />
@@ -303,7 +320,7 @@ watchEffect(() => {
       @reset="url.reset()"
     >
       <template #actions>
-        <el-button size="small" :disabled="selectedIds.length === 0" :icon="Check" @click="batchComplete">
+        <el-button size="small" :disabled="selectedIds.length === 0 || currentLocked" :icon="Check" @click="batchComplete">
           批量完成（{{ selectedIds.length }}）
         </el-button>
       </template>
@@ -349,9 +366,9 @@ watchEffect(() => {
           <span class="gb-muted">{{ order.material || '未填材料' }}</span>
           <span class="gb-muted">{{ order.operator || '未填操作人' }} · {{ order.date }}</span>
           <div style="margin-left: auto; display: flex; gap: 4px">
-            <el-button size="small" text type="primary" @click="advance(order)">推进状态</el-button>
-            <el-button size="small" text :icon="Edit" @click="openEdit(order)">编辑</el-button>
-            <el-button size="small" text type="danger" :icon="Delete" @click="remove(order)">删除</el-button>
+            <el-button size="small" text type="primary" :disabled="currentLocked" @click="advance(order)">推进状态</el-button>
+            <el-button size="small" text :icon="Edit" :disabled="currentLocked" @click="openEdit(order)">编辑</el-button>
+            <el-button size="small" text type="danger" :icon="Delete" :disabled="currentLocked" @click="remove(order)">删除</el-button>
           </div>
         </div>
 

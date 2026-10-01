@@ -14,6 +14,8 @@ import StatBadge from '@/components/common/StatBadge.vue'
 import { useIdbTable } from '@/hooks/useIdbTable'
 import { useBookStore } from '@/stores/bookStore'
 import { useLeafStore } from '@/stores/leafStore'
+import { assertVolumeOpenForRepair } from '@/utils/db'
+import { isVolumeLocked } from '@/types/volume'
 import {
   DEFAULT_DYE_RECIPE,
   DELTA_E_THRESHOLD,
@@ -75,6 +77,13 @@ function leafPattern(leafId: string): string {
   const leaf = leafStore.leafById(leafId)
   if (!leaf) return '二指帘纹'
   return leaf.damageType === 'stain' ? '细帘纹' : '二指帘纹'
+}
+
+/** 补纸是修复师那本的资料：装订完成 / 挂起 / 归档后只读，返修交回才重开 */
+function leafLocked(leafId: string): boolean {
+  const leaf = leafStore.leafById(leafId)
+  const volume = leaf ? bookStore.volumeById(leaf.volumeId) : undefined
+  return volume ? isVolumeLocked(volume.phase) : false
 }
 
 const rows = computed(() => {
@@ -177,6 +186,12 @@ async function submit(): Promise<void> {
     ElMessage.warning('请选择关联书叶')
     return
   }
+  try {
+    await assertVolumeOpenForRepair(leafStore.leafById(form.leafId)?.volumeId ?? '')
+  } catch (err) {
+    ElMessage.warning(err instanceof Error ? err.message : '该册已装订锁定')
+    return
+  }
   if (editing.value) {
     await paperTable.update(editing.value.id, { ...form })
     ElMessage.success('已更新补纸记录')
@@ -188,6 +203,12 @@ async function submit(): Promise<void> {
 }
 
 async function remove(paper: Paper): Promise<void> {
+  try {
+    await assertVolumeOpenForRepair(leafStore.leafById(paper.leafId)?.volumeId ?? '')
+  } catch (err) {
+    ElMessage.warning(err instanceof Error ? err.message : '该册已装订锁定')
+    return
+  }
   try {
     await ElMessageBox.confirm('将删除该补纸选配记录。', '删除补纸', {
       type: 'warning',
@@ -234,6 +255,12 @@ const candidateLeafPattern = computed(() =>
 
 async function selectCandidate(type: PaperType, deltaE: number, laidPatternValue: string, thicknessMm: number): Promise<void> {
   if (!candidateLeafId.value) return
+  try {
+    await assertVolumeOpenForRepair(leafStore.leafById(candidateLeafId.value)?.volumeId ?? '')
+  } catch (err) {
+    ElMessage.warning(err instanceof Error ? err.message : '该册已装订锁定')
+    return
+  }
   const existing = paperTable.rows.value.find(
     (item) => item.leafId === candidateLeafId.value && item.paperType === type
   )
@@ -349,8 +376,8 @@ function deltaTag(deltaE: number): { label: string; color: string } {
             </el-table-column>
             <el-table-column label="操作" width="150">
               <template #default="{ row }">
-                <el-button size="small" text :icon="Edit" @click="openEdit(row)">编辑</el-button>
-                <el-button size="small" text type="danger" :icon="Delete" @click="remove(row)">删除</el-button>
+                <el-button size="small" text :icon="Edit" :disabled="leafLocked(row.leafId)" @click="openEdit(row)">编辑</el-button>
+                <el-button size="small" text type="danger" :icon="Delete" :disabled="leafLocked(row.leafId)" @click="remove(row)">删除</el-button>
               </template>
             </el-table-column>
           </el-table>

@@ -4,7 +4,7 @@
  */
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import { createId, db, readUiPrefs, writeUiPrefs } from '@/utils/db'
+import { assertVolumeOpenForRepair, createId, db, readUiPrefs, writeUiPrefs } from '@/utils/db'
 import { createEmptyOrderDraft, type OrderState, type RepairOrder, type RepairOrderDraft } from '@/types/repairOrder'
 import { useLeafStore } from './leafStore'
 
@@ -51,16 +51,25 @@ export const useRepairStore = defineStore('repair', () => {
     return list.length === 0 ? 1 : Math.max(...list.map((order) => order.seq)) + 1
   }
 
+  /** 工序所属册（从叶子反查）；装订锁定的册子不允许再写工序材料 */
+  function volumeIdOfLeaf(leafId: string): string {
+    return useLeafStore().leafById(leafId)?.volumeId ?? ''
+  }
+
   async function createOrder(draft: RepairOrderDraft): Promise<RepairOrder> {
+    await assertVolumeOpenForRepair(volumeIdOfLeaf(draft.leafId))
     const now = Date.now()
     const row: RepairOrder = { ...draft, id: createId('order'), createdAt: now, updatedAt: now }
     await db.repairOrders.put(row)
     await loadOrders()
+    const volumeId = volumeIdOfLeaf(row.leafId)
+    if (volumeId) await useLeafStore().syncVolumeProgress(volumeId)
     return row
   }
 
   /** 按叶生成标准工序序列（补破 → 托裱 → 溜口 → 裁齐 → 压平） */
   async function generateSequence(leafId: string): Promise<number> {
+    await assertVolumeOpenForRepair(volumeIdOfLeaf(leafId))
     const existing = ordersOfLeaf(leafId)
     const names: RepairOrderDraft['name'][] = ['mend', 'mount', 'corner', 'trim', 'press']
     let created = 0
@@ -79,16 +88,21 @@ export const useRepairStore = defineStore('repair', () => {
       created += 1
     }
     await loadOrders()
+    const volumeId = volumeIdOfLeaf(leafId)
+    if (volumeId) await useLeafStore().syncVolumeProgress(volumeId)
     return created
   }
 
   async function updateOrder(id: string, patch: Partial<RepairOrder>): Promise<void> {
+    const existing = orders.value.find((order) => order.id === id)
+    await assertVolumeOpenForRepair(volumeIdOfLeaf(patch.leafId ?? existing?.leafId ?? ''))
     await db.repairOrders.update(id, { ...patch, updatedAt: Date.now() } as never)
     await loadOrders()
   }
 
   async function removeOrder(id: string): Promise<void> {
     const target = orders.value.find((order) => order.id === id)
+    if (target) await assertVolumeOpenForRepair(volumeIdOfLeaf(target.leafId))
     await db.repairOrders.delete(id)
     if (target) {
       const rest = orders.value
@@ -98,18 +112,24 @@ export const useRepairStore = defineStore('repair', () => {
       if (rest.length > 0) await db.repairOrders.bulkPut(rest)
     }
     await loadOrders()
+    if (target) await useLeafStore().syncVolumeProgress(volumeIdOfLeaf(target.leafId))
   }
 
   async function batchUpdate(ids: string[], patch: Partial<RepairOrder>): Promise<void> {
     if (ids.length === 0) return
+    const targets = orders.value.filter((order) => ids.includes(order.id))
+    const volumeIds = new Set(targets.map((order) => volumeIdOfLeaf(order.leafId)))
+    for (const volumeId of volumeIds) await assertVolumeOpenForRepair(volumeId)
     const now = Date.now()
-    const rows = orders.value.filter((order) => ids.includes(order.id)).map((order) => ({ ...order, ...patch, updatedAt: now }))
+    const rows = targets.map((order) => ({ ...order, ...patch, updatedAt: now }))
     await db.repairOrders.bulkPut(rows)
     await loadOrders()
+    for (const volumeId of volumeIds) await useLeafStore().syncVolumeProgress(volumeId)
   }
 
   /** 拖拽重排：按新顺序落库并重编号 */
   async function reorderOrders(leafId: string, orderedIds: string[]): Promise<void> {
+    await assertVolumeOpenForRepair(volumeIdOfLeaf(leafId))
     const indexOf = new Map(orderedIds.map((id, index) => [id, index]))
     const rows = orders.value
       .filter((order) => order.leafId === leafId)
@@ -121,6 +141,8 @@ export const useRepairStore = defineStore('repair', () => {
       .map((order, index) => ({ ...order, seq: index + 1, updatedAt: Date.now() }))
     await db.repairOrders.bulkPut(rows)
     await loadOrders()
+    const volumeId = volumeIdOfLeaf(leafId)
+    if (volumeId) await useLeafStore().syncVolumeProgress(volumeId)
   }
 
   /** 推进工序状态；完成时回写书叶状态 */

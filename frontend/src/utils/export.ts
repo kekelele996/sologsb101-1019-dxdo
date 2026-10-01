@@ -3,13 +3,15 @@
  * 全部在浏览器本地完成，不经过任何服务端。
  */
 import type { Book } from '@/types/book'
-import type { Volume } from '@/types/volume'
+import type { VolumeView } from '@/types/volume'
 import type { Leaf } from '@/types/leaf'
 import type { Paper } from '@/types/paper'
 import type { RepairOrder } from '@/types/repairOrder'
 import type { Binding } from '@/types/binding'
+import type { LeafCheck } from '@/types/leafCheck'
 import { BOOK_LEVEL_LABEL } from '@/types/book'
 import { BINDING_TYPE_LABEL, VOLUME_STATE_LABEL } from '@/types/volume'
+import { BINDERY_PHASE_LABEL } from '@/types/binderyVolume'
 import { DAMAGE_TYPE_LABEL, LEAF_STATE_LABEL } from '@/types/leaf'
 import { PAPER_TYPE_LABEL, deltaELevel } from '@/types/paper'
 import { REPAIR_NAME_LABEL } from '@/types/repairOrder'
@@ -50,11 +52,14 @@ function csvCell(value: string | number | null): string {
 
 export interface ExportContext {
   books: Book[]
-  volumes: Volume[]
+  /** 两本聚合视图：叶数 / 修复状态取修复本，装订形式 / 阶段取装订本 */
+  volumes: VolumeView[]
   leaves: Leaf[]
   papers: Paper[]
   repairOrders: RepairOrder[]
   bindings: Binding[]
+  /** 装订间逐叶点收（归档清单标注对账结果用，可空） */
+  leafChecks?: LeafCheck[]
 }
 
 /** 验收归档清单文本：按古籍 → 册次 → 书叶 → 工序展开 */
@@ -64,18 +69,22 @@ export function buildArchiveReport(context: ExportContext): string {
     lines.push('当前没有古籍档案。')
     return lines.join('\n')
   }
+  const checkLeafNos = (volumeId: string): Set<number> =>
+    new Set((context.leafChecks ?? []).filter((check) => check.volumeId === volumeId).map((check) => check.leafNo))
   context.books.forEach((book, bookIndex) => {
     lines.push(`${bookIndex + 1}. 《${book.title}》　${book.edition}　${book.era}　${BOOK_LEVEL_LABEL[book.level]}　收藏号 ${book.collectionNo || '未编'}`)
     const volumes = context.volumes.filter((volume) => volume.bookId === book.id)
     if (volumes.length === 0) lines.push('   （暂无册次）')
     volumes.forEach((volume) => {
       const leaves = context.leaves.filter((leaf) => leaf.volumeId === volume.id)
-      const binding = context.bindings.find((item) => item.volumeId === volume.id)
+      const binding = context.bindings
+        .filter((item) => item.volumeId === volume.id)
+        .sort((a, b) => b.updatedAt - a.updatedAt)[0]
       const totalArea = Math.round(leaves.reduce((sum, leaf) => sum + leaf.damageAreaCm2, 0) * 10) / 10
       const averagePh =
         leaves.length === 0 ? 0 : Math.round((leaves.reduce((sum, leaf) => sum + leaf.phValue, 0) / leaves.length) * 100) / 100
       lines.push(
-        `   第 ${volume.volumeNo} 册　${BINDING_TYPE_LABEL[volume.bindingType]}　${VOLUME_STATE_LABEL[volume.state]}　叶数 ${volume.leafCount}　破损 ${totalArea} cm²　平均 pH ${averagePh}`
+        `   第 ${volume.volumeNo} 册　${BINDING_TYPE_LABEL[volume.bindingType]}（装订本：${BINDERY_PHASE_LABEL[volume.phase]}）　${VOLUME_STATE_LABEL[volume.state]}　叶数 ${volume.leafCount}（修复本）　破损 ${totalArea} cm²　平均 pH ${averagePh}`
       )
       lines.push(
         `      装订验收：${
@@ -84,11 +93,13 @@ export function buildArchiveReport(context: ExportContext): string {
             : '尚未装订'
         }`
       )
+      const checked = checkLeafNos(volume.id)
       leaves.forEach((leaf) => {
         const orders = context.repairOrders.filter((order) => order.leafId === leaf.id)
         const done = orders.filter((order) => order.state === 'done').length
+        const checkMark = checked.has(leaf.leafNo) ? '装订已点收' : '装订未点收'
         lines.push(
-          `      · 第 ${leaf.leafNo} 叶　${DAMAGE_TYPE_LABEL[leaf.damageType]}　${leaf.damageAreaCm2} cm²　pH ${leaf.phValue}　${LEAF_STATE_LABEL[leaf.state]}　工序 ${done}/${orders.length}`
+          `      · 第 ${leaf.leafNo} 叶　${DAMAGE_TYPE_LABEL[leaf.damageType]}　${leaf.damageAreaCm2} cm²　pH ${leaf.phValue}　${LEAF_STATE_LABEL[leaf.state]}　工序 ${done}/${orders.length}　${checkMark}`
         )
       })
     })
