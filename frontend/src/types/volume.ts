@@ -1,13 +1,13 @@
 /**
- * 册次（Volume）数据模型
- * 一部古籍下的册，是书叶与装订记录的挂载单元。
+ * 册次（Volume）数据模型 —— 修复师那本
+ * 一部古籍下的册，只记修复侧的状态与叶数；装订方式、验收结论归装订间那本（Binding）。
  */
 
-/** 装订形式：线装 / 蝴蝶装 / 包背装 */
-export type BindingType = 'thread' | 'butterfly' | 'wrapped';
+/** 册次修复状态：待修复 / 修复中 / 修复完成（待装订） */
+export type VolumeState = 'pending' | 'repairing' | 'repaired';
 
-/** 册次状态：待修复 / 修复中 / 已装订 / 已归档 */
-export type VolumeState = 'pending' | 'repairing' | 'bound' | 'archived';
+/** 展示用状态：在修复状态基础上，装订间验收合格后整册锁为「已归档」 */
+export type VolumeDisplayState = VolumeState | 'archived';
 
 export interface Volume {
   id: string;
@@ -17,9 +17,7 @@ export interface Volume {
   volumeNo: number;
   /** 叶数 */
   leafCount: number;
-  /** 装订形式 */
-  bindingType: BindingType;
-  /** 当前状态 */
+  /** 修复侧当前状态 */
   state: VolumeState;
   createdAt: number;
   updatedAt: number;
@@ -27,45 +25,27 @@ export interface Volume {
 
 export type VolumeDraft = Omit<Volume, 'id' | 'createdAt' | 'updatedAt'>;
 
-export const BINDING_TYPE_LABEL: Record<BindingType, string> = {
-  thread: '线装',
-  butterfly: '蝴蝶装',
-  wrapped: '包背装',
-};
-
-export const BINDING_TYPE_OPTIONS: ReadonlyArray<{ value: BindingType; label: string }> = [
-  { value: 'thread', label: '线装' },
-  { value: 'butterfly', label: '蝴蝶装' },
-  { value: 'wrapped', label: '包背装' },
-];
-
-export const VOLUME_STATE_LABEL: Record<VolumeState, string> = {
+export const VOLUME_STATE_LABEL: Record<VolumeDisplayState, string> = {
   pending: '待修复',
   repairing: '修复中',
-  bound: '已装订',
-  archived: '已归档',
+  repaired: '修复完成',
+  archived: '已归档'
 };
 
-export const VOLUME_STATE_COLOR: Record<VolumeState, string> = {
+export const VOLUME_STATE_COLOR: Record<VolumeDisplayState, string> = {
   pending: '#8c8c8c',
   repairing: '#d68910',
-  bound: '#3a6ea5',
-  archived: '#1e8449',
+  repaired: '#3a6ea5',
+  archived: '#1e8449'
 };
 
 export const VOLUME_STATE_OPTIONS: ReadonlyArray<{ value: VolumeState; label: string }> = [
   { value: 'pending', label: '待修复' },
   { value: 'repairing', label: '修复中' },
-  { value: 'bound', label: '已装订' },
-  { value: 'archived', label: '已归档' },
+  { value: 'repaired', label: '修复完成' }
 ];
 
-/** 装订完成后整册锁定为只读 */
-export function isVolumeLocked(state: VolumeState): boolean {
-  return state === 'bound' || state === 'archived';
-}
-
-export const VOLUME_STATE_FLOW: readonly VolumeState[] = ['pending', 'repairing', 'bound', 'archived'];
+export const VOLUME_STATE_FLOW: readonly VolumeState[] = ['pending', 'repairing', 'repaired'];
 
 export function nextVolumeState(state: VolumeState): VolumeState {
   const index = VOLUME_STATE_FLOW.indexOf(state);
@@ -78,7 +58,6 @@ export function createEmptyVolumeDraft(bookId: string, volumeNo: number): Volume
     bookId,
     volumeNo,
     leafCount: 0,
-    bindingType: 'thread',
-    state: 'pending',
+    state: 'pending'
   };
 }

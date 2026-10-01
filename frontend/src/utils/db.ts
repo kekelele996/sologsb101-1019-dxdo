@@ -1,6 +1,9 @@
 /**
  * IndexedDB 持久化层（Dexie 封装）
- * - 数据结构版本号与升级迁移逻辑（v1 → v2：Paper 增加 dyeRecipe 字段并按纸种回填默认配方）
+ * - 数据结构版本号与升级迁移逻辑
+ *   v1 → v2：Paper 增加 dyeRecipe 字段并按纸种回填默认配方
+ *   v2 → v3：册次拆成修复师 / 装订间两本账 —— Volume 去掉装订形式、状态归置为修复侧；
+ *            Binding 增加 status 与 leafChecks，旧数据按现状回填装订间状态与叶号签收
  * - 六张业务表的增删改查与整库导入导出
  * - 首次打开自动播种三层互相引用的演示数据（幂等）
  * 纯前端应用：不依赖任何后端服务或数据库。
@@ -17,7 +20,7 @@ import type { Binding } from '@/types/binding'
 export const DB_NAME = 'gbbookrestore'
 
 /** 当前数据结构版本号 */
-export const DB_VERSION = 2
+export const DB_VERSION = 3
 
 /** localStorage 侧少量元数据键 */
 export const LS_KEYS = {
@@ -101,7 +104,7 @@ export class BookRestoreDatabase extends Dexie {
       bindings: 'id, volumeId, verdict, finishDate, updatedAt'
     })
     // v2：Paper 增加 dyeRecipe 字段，按纸种为历史记录回填默认配方
-    this.version(DB_VERSION)
+    this.version(2)
       .stores({
         books: 'id, title, era, level, collectionNo, updatedAt',
         volumes: 'id, bookId, volumeNo, bindingType, state, updatedAt',
@@ -120,6 +123,55 @@ export class BookRestoreDatabase extends Dexie {
             }
             if (typeof paper.deltaE !== 'number') paper.deltaE = 2
             if (typeof paper.thicknessMm !== 'number') paper.thicknessMm = 0.06
+          })
+      })
+    // v3：册次拆成修复师 / 装订间两本账。
+    // 修复师那本（volumes）去掉装订形式，状态归置为修复侧；装订间那本（bindings）增加 status 与 leafChecks。
+    // 旧数据缺归属，先按现状回填再启用：已装订 / 已归档 → 修复完成，合格的装订记录 → 已归档，
+    // 装订间叶号签收按修复师账上的叶号现状回填。
+    this.version(DB_VERSION)
+      .stores({
+        books: 'id, title, era, level, collectionNo, updatedAt',
+        volumes: 'id, bookId, volumeNo, state, updatedAt',
+        leaves: 'id, volumeId, leafNo, damageType, phValue, state, updatedAt',
+        papers: 'id, leafId, paperType, laidPattern, deltaE, updatedAt',
+        repairOrders: 'id, leafId, seq, name, operator, state, updatedAt',
+        bindings: 'id, volumeId, method, verdict, status, finishDate, updatedAt'
+      })
+      .upgrade(async (tx) => {
+        const legacyVolumes = await tx.table<Volume>('volumes').toArray()
+        const legacyLeaves = await tx.table<Leaf>('leaves').toArray()
+        // 修复师那本：状态按现状归置，去掉装订形式字段
+        await tx
+          .table<Volume>('volumes')
+          .toCollection()
+          .modify((volume) => {
+            const oldState = volume.state as string
+            volume.state =
+              oldState === 'archived' || oldState === 'bound'
+                ? 'repaired'
+                : oldState === 'repairing'
+                  ? 'repairing'
+                  : 'pending'
+            delete (volume as { bindingType?: string }).bindingType
+          })
+        // 装订间那本：按现状回填状态与叶号签收
+        await tx
+          .table<Binding>('bindings')
+          .toCollection()
+          .modify((binding) => {
+            const volume = legacyVolumes.find((item) => item.id === binding.volumeId)
+            const volumeDone = volume ? ['archived', 'bound'].includes(volume.state as string) : false
+            const leafNos = Array.from(
+              new Set(
+                legacyLeaves
+                  .filter((leaf) => leaf.volumeId === binding.volumeId)
+                  .map((leaf) => leaf.leafNo)
+              )
+            ).sort((a, b) => a - b)
+            binding.status = binding.verdict === 'pass' && volumeDone ? 'archived' : 'open'
+            if (!binding.verdict) binding.verdict = 'pass'
+            binding.leafChecks = leafNos.map((leafNo) => ({ leafNo, received: true }))
           })
       })
   }
@@ -186,10 +238,10 @@ export async function seedDatabase(): Promise<void> {
   ]
 
   const volumes: Volume[] = [
-    { id: 'vol_0101', bookId: 'book_01', volumeNo: 1, leafCount: 24, bindingType: 'thread', state: 'repairing', createdAt: now - day * 38, updatedAt: now - day * 3 },
-    { id: 'vol_0102', bookId: 'book_01', volumeNo: 2, leafCount: 18, bindingType: 'wrapped', state: 'pending', createdAt: now - day * 38, updatedAt: now - day * 6 },
-    { id: 'vol_0201', bookId: 'book_02', volumeNo: 1, leafCount: 30, bindingType: 'thread', state: 'archived', createdAt: now - day * 30, updatedAt: now - day * 2 },
-    { id: 'vol_0301', bookId: 'book_03', volumeNo: 1, leafCount: 12, bindingType: 'butterfly', state: 'archived', createdAt: now - day * 55, updatedAt: now - day * 5 }
+    { id: 'vol_0101', bookId: 'book_01', volumeNo: 1, leafCount: 24, state: 'repairing', createdAt: now - day * 38, updatedAt: now - day * 3 },
+    { id: 'vol_0102', bookId: 'book_01', volumeNo: 2, leafCount: 18, state: 'pending', createdAt: now - day * 38, updatedAt: now - day * 6 },
+    { id: 'vol_0201', bookId: 'book_02', volumeNo: 1, leafCount: 30, state: 'repaired', createdAt: now - day * 30, updatedAt: now - day * 2 },
+    { id: 'vol_0301', bookId: 'book_03', volumeNo: 1, leafCount: 12, state: 'repaired', createdAt: now - day * 55, updatedAt: now - day * 5 }
   ]
 
   const leaves: Leaf[] = [
@@ -225,9 +277,42 @@ export async function seedDatabase(): Promise<void> {
   ]
 
   const bindings: Binding[] = [
-    { id: 'bind_0201', volumeId: 'vol_0201', method: '六眼线装', finishDate: '2026-03-03', verdict: 'pass', inspector: '程砚', createdAt: now - day * 3, updatedAt: now - day * 2 },
-    { id: 'bind_0301', volumeId: 'vol_0301', method: '蝴蝶装复原', finishDate: '2026-02-18', verdict: 'pass', inspector: '程砚', createdAt: now - day * 8, updatedAt: now - day * 5 },
-    { id: 'bind_0101', volumeId: 'vol_0101', method: '四眼线装', finishDate: '2026-03-10', verdict: 'rework', inspector: '程砚', createdAt: now - day * 2, updatedAt: now - day * 2 }
+    {
+      id: 'bind_0201',
+      volumeId: 'vol_0201',
+      method: '六眼线装',
+      finishDate: '2026-03-03',
+      verdict: 'pass',
+      inspector: '程砚',
+      status: 'archived',
+      leafChecks: [5, 11].map((leafNo) => ({ leafNo, received: true })),
+      createdAt: now - day * 3,
+      updatedAt: now - day * 2
+    },
+    {
+      id: 'bind_0301',
+      volumeId: 'vol_0301',
+      method: '蝴蝶装复原',
+      finishDate: '2026-02-18',
+      verdict: 'pass',
+      inspector: '程砚',
+      status: 'archived',
+      leafChecks: [1, 6].map((leafNo) => ({ leafNo, received: true })),
+      createdAt: now - day * 8,
+      updatedAt: now - day * 5
+    },
+    {
+      id: 'bind_0101',
+      volumeId: 'vol_0101',
+      method: '四眼线装',
+      finishDate: '2026-03-10',
+      verdict: 'rework',
+      inspector: '程砚',
+      status: 'open',
+      leafChecks: [3, 8].map((leafNo) => ({ leafNo, received: true })),
+      createdAt: now - day * 2,
+      updatedAt: now - day * 2
+    }
   ]
 
   await db.transaction(

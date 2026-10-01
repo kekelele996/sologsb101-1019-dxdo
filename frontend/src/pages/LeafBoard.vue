@@ -16,6 +16,8 @@ import { useIdbTable } from '@/hooks/useIdbTable'
 import { useLeafStats } from '@/hooks/useLeafStats'
 import { useBookStore } from '@/stores/bookStore'
 import { useLeafStore } from '@/stores/leafStore'
+import { useRepairStore } from '@/stores/repairStore'
+import { useBindingStore } from '@/stores/bindingStore'
 import { PAPER_TYPE_LABEL, type Paper } from '@/types/paper'
 import {
   DAMAGE_TYPE_OPTIONS,
@@ -29,14 +31,14 @@ import {
   type LeafDraft,
   type LeafState
 } from '@/types/leaf'
-import { BINDING_TYPE_LABEL, VOLUME_STATE_LABEL, isVolumeLocked } from '@/types/volume'
-import { useRepairStore } from '@/stores/repairStore'
+import { VOLUME_STATE_LABEL, type Volume } from '@/types/volume'
 
 const route = useRoute()
 const router = useRouter()
 const bookStore = useBookStore()
 const leafStore = useLeafStore()
 const repairStore = useRepairStore()
+const bindingStore = useBindingStore()
 const { statOf } = useLeafStats()
 const paperTable = useIdbTable<Paper>((database) => database.papers, { sortByUpdatedAt: false })
 
@@ -64,7 +66,12 @@ watch(
 )
 
 const currentVolume = computed(() => volumes.value.find((volume) => volume.id === bookStore.currentVolumeId) ?? null)
-const locked = computed(() => (currentVolume.value ? isVolumeLocked(currentVolume.value.state) : false))
+const locked = computed(() => (currentVolume.value ? bindingStore.isVolumeLocked(currentVolume.value.id) : false))
+
+function volumeStateLabel(volume: Volume): string {
+  const state = bindingStore.isVolumeLocked(volume.id) ? 'archived' : volume.state
+  return VOLUME_STATE_LABEL[state] ?? state
+}
 
 const FILTER_KEYS = ['damageType', 'state'] as const
 const url = useFilterQuery(FILTER_KEYS)
@@ -244,8 +251,8 @@ function stateColor(state: string): string {
         show-icon
         :closable="false"
         style="margin-bottom: 12px"
-        title="该册已装订完成，整册锁定为只读"
-        description="如需继续登记破损，请先在古籍台账中把册次状态回退为「修复中」。"
+        title="该册已装订验收，整册锁定为只读"
+        description="如需继续登记破损，请在「装订归档」页把验收结论改为返修，册子会交回修复师那本重开。"
       />
 
       <el-card shadow="never" style="margin-bottom: 14px">
@@ -253,8 +260,7 @@ function stateColor(state: string): string {
           <span class="gb-muted">册次：</span>
           <el-radio-group :model-value="bookStore.currentVolumeId" @update:model-value="(value: string | number | boolean | undefined) => bookStore.setCurrentVolume(String(value))">
             <el-radio-button v-for="volume in volumes" :key="volume.id" :value="volume.id">
-              第 {{ volume.volumeNo }} 册 · {{ BINDING_TYPE_LABEL[volume.bindingType] }} ·
-              {{ VOLUME_STATE_LABEL[volume.state] }}
+              第 {{ volume.volumeNo }} 册 · {{ volumeStateLabel(volume) }}
             </el-radio-button>
           </el-radio-group>
           <el-tag v-if="currentVolume" type="info" effect="plain" round>

@@ -9,7 +9,7 @@ import type { Paper } from '@/types/paper'
 import type { RepairOrder } from '@/types/repairOrder'
 import type { Binding } from '@/types/binding'
 import { BOOK_LEVEL_LABEL } from '@/types/book'
-import { BINDING_TYPE_LABEL, VOLUME_STATE_LABEL } from '@/types/volume'
+import { VOLUME_STATE_LABEL } from '@/types/volume'
 import { DAMAGE_TYPE_LABEL, LEAF_STATE_LABEL } from '@/types/leaf'
 import { PAPER_TYPE_LABEL, deltaELevel } from '@/types/paper'
 import { REPAIR_NAME_LABEL } from '@/types/repairOrder'
@@ -71,16 +71,17 @@ export function buildArchiveReport(context: ExportContext): string {
     volumes.forEach((volume) => {
       const leaves = context.leaves.filter((leaf) => leaf.volumeId === volume.id)
       const binding = context.bindings.find((item) => item.volumeId === volume.id)
+      const displayState = binding?.status === 'archived' ? 'archived' : volume.state
       const totalArea = Math.round(leaves.reduce((sum, leaf) => sum + leaf.damageAreaCm2, 0) * 10) / 10
       const averagePh =
         leaves.length === 0 ? 0 : Math.round((leaves.reduce((sum, leaf) => sum + leaf.phValue, 0) / leaves.length) * 100) / 100
       lines.push(
-        `   第 ${volume.volumeNo} 册　${BINDING_TYPE_LABEL[volume.bindingType]}　${VOLUME_STATE_LABEL[volume.state]}　叶数 ${volume.leafCount}　破损 ${totalArea} cm²　平均 pH ${averagePh}`
+        `   第 ${volume.volumeNo} 册　${binding?.method ?? '未装订'}　${VOLUME_STATE_LABEL[displayState]}　叶数 ${volume.leafCount}　破损 ${totalArea} cm²　平均 pH ${averagePh}`
       )
       lines.push(
         `      装订验收：${
           binding
-            ? `${binding.method}　${binding.finishDate}　${BINDING_VERDICT_LABEL[binding.verdict]}　验收人 ${binding.inspector || '未填写'}`
+            ? `${binding.method}　${binding.finishDate}　${binding.verdict ? BINDING_VERDICT_LABEL[binding.verdict] : '未验收'}　验收人 ${binding.inspector || '未填写'}`
             : '尚未装订'
         }`
       )

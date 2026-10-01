@@ -11,11 +11,11 @@ import { Delete, Edit, Plus, Right } from '@element-plus/icons-vue'
 import EmptyPanel from '@/components/common/EmptyPanel.vue'
 import FilterBar, { useFilterQuery, type FilterModel } from '@/components/common/FilterBar.vue'
 import StatBadge from '@/components/common/StatBadge.vue'
-import { useIdbTable } from '@/hooks/useIdbTable'
 import { useLeafStats } from '@/hooks/useLeafStats'
 import { useBookStore } from '@/stores/bookStore'
 import { useLeafStore } from '@/stores/leafStore'
 import { useRepairStore } from '@/stores/repairStore'
+import { useBindingStore } from '@/stores/bindingStore'
 import {
   BOOK_LEVEL_COLOR,
   BOOK_LEVEL_LABEL,
@@ -25,15 +25,11 @@ import {
   type BookDraft,
   type BookLevel
 } from '@/types/book'
-import type { Binding } from '@/types/binding'
 import {
-  BINDING_TYPE_LABEL,
-  BINDING_TYPE_OPTIONS,
   VOLUME_STATE_COLOR,
   VOLUME_STATE_LABEL,
   VOLUME_STATE_OPTIONS,
   createEmptyVolumeDraft,
-  isVolumeLocked,
   type Volume,
   type VolumeDraft
 } from '@/types/volume'
@@ -42,8 +38,8 @@ const router = useRouter()
 const bookStore = useBookStore()
 const leafStore = useLeafStore()
 const repairStore = useRepairStore()
+const bindingStore = useBindingStore()
 const { statOf } = useLeafStats()
-const bindingTable = useIdbTable<Binding>((database) => database.bindings, { sortByUpdatedAt: false })
 
 const FILTER_KEYS = ['era', 'level'] as const
 const url = useFilterQuery(FILTER_KEYS)
@@ -152,7 +148,6 @@ function openEditVolume(volume: Volume): void {
     bookId: volume.bookId,
     volumeNo: volume.volumeNo,
     leafCount: volume.leafCount,
-    bindingType: volume.bindingType,
     state: volume.state
   })
 }
@@ -220,10 +215,10 @@ function bookStat(bookId: string): {
   )
 }
 
-/** 该古籍下已装订 / 已归档的册数，卡片回显使用 */
+/** 该古籍下已装订验收的册数（看装订间那本），卡片回显使用 */
 function boundVolumes(bookId: string): number {
   const volumeIds = bookStore.volumesOfBook(bookId).map((volume) => volume.id)
-  return bindingTable.rows.value.filter((binding) => volumeIds.includes(binding.volumeId)).length
+  return bindingStore.bindings.filter((binding) => volumeIds.includes(binding.volumeId)).length
 }
 
 const totals = computed(() => ({
@@ -244,16 +239,20 @@ function openVolumeFromHeader(): void {
   openVolumeDialog(target)
 }
 
-function volumeStateLabel(state: string): string {
-  return VOLUME_STATE_LABEL[state as keyof typeof VOLUME_STATE_LABEL] ?? state
+function volumeStateLabel(volume: Volume): string {
+  const state = bindingStore.isVolumeLocked(volume.id) ? 'archived' : volume.state
+  return VOLUME_STATE_LABEL[state] ?? state
 }
 
-function volumeStateColor(state: string): string {
-  return VOLUME_STATE_COLOR[state as keyof typeof VOLUME_STATE_COLOR] ?? '#6b6257'
+function volumeStateColor(volume: Volume): string {
+  const state = bindingStore.isVolumeLocked(volume.id) ? 'archived' : volume.state
+  return VOLUME_STATE_COLOR[state] ?? '#6b6257'
 }
 
-function bindingLabel(value: string): string {
-  return BINDING_TYPE_LABEL[value as keyof typeof BINDING_TYPE_LABEL] ?? value
+/** 装订间那本记录的装订方式；未装订则提示 */
+function bindingMethod(volumeId: string): string {
+  const binding = bindingStore.bindingOfVolume(volumeId)
+  return binding ? binding.method : '未装订'
 }
 </script>
 
@@ -384,11 +383,6 @@ function bindingLabel(value: string): string {
         <el-form-item label="叶数">
           <el-input-number v-model="volumeForm.leafCount" :min="0" :max="2000" />
         </el-form-item>
-        <el-form-item label="装订">
-          <el-select v-model="volumeForm.bindingType" style="width: 130px">
-            <el-option v-for="item in BINDING_TYPE_OPTIONS" :key="item.value" :label="item.label" :value="item.value" />
-          </el-select>
-        </el-form-item>
         <el-form-item label="状态">
           <el-select v-model="volumeForm.state" style="width: 130px">
             <el-option v-for="item in VOLUME_STATE_OPTIONS" :key="item.value" :label="item.label" :value="item.value" />
@@ -402,18 +396,18 @@ function bindingLabel(value: string): string {
 
       <el-table :data="volumeList" size="small" border>
         <el-table-column prop="volumeNo" label="册次" width="80" />
-        <el-table-column label="装订形式" width="110">
-          <template #default="{ row }">{{ bindingLabel(row.bindingType) }}</template>
+        <el-table-column label="装订验收" width="120">
+          <template #default="{ row }">{{ bindingMethod(row.id) }}</template>
         </el-table-column>
         <el-table-column prop="leafCount" label="叶数" width="80" />
         <el-table-column label="状态" width="110">
           <template #default="{ row }">
             <el-tag
-              :style="{ background: `${volumeStateColor(row.state)}1f`, color: volumeStateColor(row.state) }"
+              :style="{ background: `${volumeStateColor(row)}1f`, color: volumeStateColor(row) }"
               effect="plain"
               round
             >
-              {{ volumeStateLabel(row.state) }}
+              {{ volumeStateLabel(row) }}
             </el-tag>
           </template>
         </el-table-column>
@@ -424,8 +418,8 @@ function bindingLabel(value: string): string {
         </el-table-column>
         <el-table-column label="操作" width="240">
           <template #default="{ row }">
-            <el-button size="small" text type="primary" @click="advanceVolume(row)">推进状态</el-button>
-            <el-button size="small" text :disabled="isVolumeLocked(row.state)" @click="openEditVolume(row)">编辑</el-button>
+            <el-button size="small" text type="primary" :disabled="bindingStore.isVolumeLocked(row.id) || row.state === 'repaired'" @click="advanceVolume(row)">推进状态</el-button>
+            <el-button size="small" text :disabled="bindingStore.isVolumeLocked(row.id)" @click="openEditVolume(row)">编辑</el-button>
             <el-button size="small" text type="danger" @click="removeVolume(row)">删除</el-button>
           </template>
         </el-table-column>
